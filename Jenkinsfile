@@ -131,3 +131,72 @@ buildctl-daemonless.sh build \
         }
     }
 }
+
+
+stage('Update GitOps staging') {
+    steps {
+        container('go') {
+            withCredentials([
+                usernamePassword(
+                    credentialsId: 'gitops-write',
+                    usernameVariable: 'GITOPS_USER',
+                    passwordVariable: 'GITOPS_TOKEN'
+                )
+            ]) {
+                sh '''#!/bin/sh
+set -eu
+set +x
+
+# Git authentication without embedding the token
+# in the repository URL or committing it to Git.
+ASKPASS="$(mktemp)"
+trap 'rm -f "$ASKPASS"' EXIT
+
+cat > "$ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\\n' "$GITOPS_USER" ;;
+  *Password*) printf '%s\\n' "$GITOPS_TOKEN" ;;
+  *) exit 1 ;;
+esac
+EOF
+
+chmod 700 "$ASKPASS"
+export GIT_ASKPASS="$ASKPASS"
+export GIT_TERMINAL_PROMPT=0
+
+# Clone the separate deployment repository.
+git clone \
+  https://github.com/bhuang02/orders-gitops.git \
+  gitops-workdir
+
+cd gitops-workdir
+
+# Update only the staging image tag.
+VALUES=charts/orders-api/values-staging.yaml
+
+sed -i \
+  "s|^  tag:.*|  tag: \\"$IMAGE_TAG\\"|" \
+  "$VALUES"
+
+grep -Fxq "  tag: \\"$IMAGE_TAG\\"" "$VALUES"
+
+git config user.name "Jenkins CI"
+git config user.email "jenkins-ci@users.noreply.github.com"
+
+git add "$VALUES"
+
+if git diff --cached --quiet; then
+    echo "Staging already uses this image."
+else
+    git commit -m \
+      "ci: deploy orders-api $IMAGE_TAG"
+
+    git push origin HEAD:main
+fi
+'''
+            }
+        }
+    }
+}
+
